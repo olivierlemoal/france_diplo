@@ -4,26 +4,33 @@ import re
 from urllib.parse import urlparse
 import os
 import logging
-import requests
+import trio
+import asks
 from pathlib import Path
 from datetime import datetime
 from bs4 import BeautifulSoup
-from peewee import *
+from peewee import Model, SqliteDatabase, CharField, ForeignKeyField, DateTimeField, IntegrityError
 
 DB_FILE = 'maps.db'
+MAX_CONN = 100
 db = SqliteDatabase(DB_FILE)
 logging.basicConfig(level=logging.INFO)
 DOWNLOAD_DIR = datetime.now().strftime("%d_%m_%y")
 Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
+asks.init('trio')
+session = asks.Session(connections=MAX_CONN)
+
 
 class BaseModel(Model):
     class Meta:
         database = db
 
+
 class Country(BaseModel):
     country_id = CharField(primary_key=True)
     country_name = CharField()
     url = CharField()
+
 
 class Map(BaseModel):
     country = ForeignKeyField(Country, backref="maps")
@@ -31,22 +38,21 @@ class Map(BaseModel):
     url = CharField(null=True, unique=True, index=True)
     date = DateTimeField(null=True)
 
+
 headers = {'User-Agent': "Mozilla/5.0 (X11; Linux x86_64; rv:68.0) Gecko/20100101 Firefox/68.0"}
 
-def setup_db():
+
+async def setup_db():
     db.connect()
     db.create_tables([Map, Country])
 
-    r = requests.get("https://www.diplomatie.gouv.fr/fr/conseils-aux-voyageurs/conseils-par-pays-destination/", headers=headers)
+    r = await session.get("https://www.diplomatie.gouv.fr/fr/conseils-aux-voyageurs/conseils-par-pays-destination/", headers=headers)
     soup = BeautifulSoup(r.text, 'lxml')
     for country in soup.select('div.clearfix select#recherche_pays option'):
         if country.text == "Sélectionnez un pays/destination":
             continue
         Country.create(country_name=country.text, country_id=country["value"].split("/")[-2], url=country["value"])
 
-
-if not os.path.isfile(DB_FILE): 
-    setup_db()
 
 def find_image(soup):
     # Most of URLs
@@ -68,19 +74,27 @@ def find_image(soup):
     url = urlparse(url)
     return url.netloc + url.path
 
-def download_map(m):
+
+async def download_map(m):
     DATE_FMT = '%Y%m%d'
     country = m.country_id
     m.date = guess_date(m)
     m.filename = country + "_" + m.date.strftime(DATE_FMT) + ".jpg"
     logging.info("Downloading map for {} as {}".format(country, m.filename))
-    r = requests.get("https://www.diplomatie.gouv.fr/" + m.url, headers=headers)
+    # try:
+    r = await session.get("https://www.diplomatie.gouv.fr/" + m.url, headers=headers, retries=3, stream=True)
+    # except ConnectTimeout:
+    #     # XXX rollback db
+    #     logging.error(f"Failed to download map for {country} (Connection Timeout)")
+    #     return
     if r.status_code == 200:
-        with open(DOWNLOAD_DIR + "/" + m.filename, 'wb') as f:
-            for chunk in r:
-                f.write(chunk)
+        async with await trio.open_file(DOWNLOAD_DIR + "/" + m.filename, 'wb') as f:
+            async for bytechunk in r.body:
+                await f.write(bytechunk)
+
 
 def guess_date(m):
+    country = m.country_id
     filename = os.path.basename(urlparse(m.url).path)
     date = re.findall(r".*(\d\d\d\d\d\d\d\d).*", filename)
     if date:
@@ -103,27 +117,40 @@ def guess_date(m):
     return date
 
 
-logging.info(f"Processing {Country.select().count()} countries")
-for country in Country.select():
+async def process_country(country):
     logging.debug(f"Processing country {country.country_name}")
-    r = requests.get("https://www.diplomatie.gouv.fr/fr/conseils-aux-voyageurs/conseils-par-pays-destination/" + country.country_id, headers=headers)
+    r = await session.get("https://www.diplomatie.gouv.fr/fr/conseils-aux-voyageurs/conseils-par-pays-destination/" + country.country_id, headers=headers)
     soup = BeautifulSoup(r.text, 'lxml')
     url = find_image(soup)
     if not url:
         logging.info(f"Can't find map URL for country {country.country_name}")
-        continue
+        return
     if Map.select().where((Map.country == country) & (Map.url == url)).exists():
         logging.info(f"No new map for country {country.country_name}")
-        continue
+        return
     try:
         m = Map.create(country=country, url=url)
     except IntegrityError:
         other_country = Map.select().where((Map.url == url)).first().country.country_name
         logging.warning(f"{country.country_name} map already exists ({other_country})")
-        continue
+        return
 
     if m.url:
-        download_map(m)
+        await download_map(m)
     else:
         logging.error(f"Can't find map for {country.country_name}")
     m.save()
+
+
+async def main():
+
+    if not os.path.isfile(DB_FILE):
+        await setup_db()
+
+    logging.info(f"Processing {Country.select().count()} countries")
+
+    async with trio.open_nursery() as nursery:
+        for country in Country.select():
+            nursery.start_soon(process_country, country)
+
+trio.run(main)
