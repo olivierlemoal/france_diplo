@@ -89,10 +89,6 @@ async def download_map(m):
     logging.info("Downloading map for {} as {}".format(country, m.filename))
     # try:
     r = await get_request("https://www.diplomatie.gouv.fr/" + m.url, stream=True)
-    # except ConnectTimeout:
-    #     # XXX rollback db
-    #     logging.error(f"Failed to download map for {country} (Connection Timeout)")
-    #     return
     if r.status_code == 200:
         async with await trio.open_file(DOWNLOAD_DIR + "/" + m.filename, 'wb') as f:
             async for bytechunk in r.body:
