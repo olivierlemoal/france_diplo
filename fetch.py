@@ -6,6 +6,7 @@ import os
 import logging
 import trio
 import asks
+from retrying import retry
 from pathlib import Path
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -46,7 +47,7 @@ async def setup_db():
     db.connect()
     db.create_tables([Map, Country])
 
-    r = await session.get("https://www.diplomatie.gouv.fr/fr/conseils-aux-voyageurs/conseils-par-pays-destination/", headers=headers)
+    r = await get_request("https://www.diplomatie.gouv.fr/fr/conseils-aux-voyageurs/conseils-par-pays-destination/")
     soup = BeautifulSoup(r.text, 'lxml')
     for country in soup.select('div.clearfix select#recherche_pays option'):
         if country.text == "Sélectionnez un pays/destination":
@@ -75,6 +76,11 @@ def find_image(soup):
     return url.netloc + url.path
 
 
+@retry(stop_max_attempt_number=3)
+async def get_request(url, stream=False):
+    return await session.get(url, headers=headers, retries=3, stream=stream)
+
+
 async def download_map(m):
     DATE_FMT = '%Y%m%d'
     country = m.country_id
@@ -82,7 +88,7 @@ async def download_map(m):
     m.filename = country + "_" + m.date.strftime(DATE_FMT) + ".jpg"
     logging.info("Downloading map for {} as {}".format(country, m.filename))
     # try:
-    r = await session.get("https://www.diplomatie.gouv.fr/" + m.url, headers=headers, retries=3, stream=True)
+    r = await get_request("https://www.diplomatie.gouv.fr/" + m.url, stream=True)
     # except ConnectTimeout:
     #     # XXX rollback db
     #     logging.error(f"Failed to download map for {country} (Connection Timeout)")
@@ -119,7 +125,7 @@ def guess_date(m):
 
 async def process_country(country):
     logging.debug(f"Processing country {country.country_name}")
-    r = await session.get("https://www.diplomatie.gouv.fr/fr/conseils-aux-voyageurs/conseils-par-pays-destination/" + country.country_id, headers=headers)
+    r = await get_request("https://www.diplomatie.gouv.fr/fr/conseils-aux-voyageurs/conseils-par-pays-destination/" + country.country_id)
     soup = BeautifulSoup(r.text, 'lxml')
     url = find_image(soup)
     if not url:
@@ -136,10 +142,13 @@ async def process_country(country):
         return
 
     if m.url:
-        await download_map(m)
+        try:
+            await download_map(m)
+            m.save()
+        except:
+            logging.error(f"Could not download map for {country.country_name}")
     else:
         logging.error(f"Can't find map for {country.country_name}")
-    m.save()
 
 
 async def main():
