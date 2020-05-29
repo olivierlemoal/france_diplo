@@ -86,8 +86,7 @@ async def download_map(m):
     country = m.country_id
     m.date = guess_date(m)
     m.filename = country + "_" + m.date.strftime(DATE_FMT) + ".jpg"
-    logging.info("Downloading map for {} as {}".format(country, m.filename))
-    # try:
+    logging.info(f"Downloading map for {country} as {m.filename}")
     r = await get_request("https://www.diplomatie.gouv.fr/" + m.url, stream=True)
     if r.status_code == 200:
         async with await trio.open_file(DOWNLOAD_DIR + "/" + m.filename, 'wb') as f:
