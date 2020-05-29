@@ -6,7 +6,7 @@ import os
 import logging
 import trio
 import asks
-from retrying import retry
+from tenacity import retry, stop_after_attempt
 from pathlib import Path
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -76,7 +76,7 @@ def find_image(soup):
     return url.netloc + url.path
 
 
-@retry(stop_max_attempt_number=3)
+@retry(stop=stop_after_attempt(3), sleep=trio.sleep)
 async def get_request(url, stream=False):
     return await session.get(url, headers=headers, retries=3, stream=stream)
 
