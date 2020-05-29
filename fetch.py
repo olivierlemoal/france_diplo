@@ -6,49 +6,40 @@ import os
 import logging
 import trio
 import asks
-from tenacity import retry, stop_after_attempt
+from tenacity import retry, stop_after_attempt, after_log
 from pathlib import Path
 from datetime import datetime
 from bs4 import BeautifulSoup
-from peewee import Model, SqliteDatabase, CharField, ForeignKeyField, DateTimeField, IntegrityError
+from peewee import IntegrityError
+from model import Map, Country, db, DB_FILE
 
-DB_FILE = 'maps.db'
-MAX_CONN = 100
-db = SqliteDatabase(DB_FILE)
-logging.basicConfig(level=logging.INFO)
+logFormatter = logging.Formatter("%(asctime)s [%(levelname)-5.5s]  %(message)s")
+rootLogger = logging.getLogger()
+rootLogger.setLevel(logging.INFO)
+
+fileHandler = logging.FileHandler(f"fetch.log")
+fileHandler.setFormatter(logFormatter)
+rootLogger.addHandler(fileHandler)
+
+consoleHandler = logging.StreamHandler()
+consoleHandler.setFormatter(logFormatter)
+rootLogger.addHandler(consoleHandler)
+
 DOWNLOAD_DIR = datetime.now().strftime("%d_%m_%y")
 Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
+
 asks.init('trio')
+MAX_CONN = 100
 session = asks.Session(connections=MAX_CONN)
-
-
-class BaseModel(Model):
-    class Meta:
-        database = db
-
-
-class Country(BaseModel):
-    country_id = CharField(primary_key=True)
-    country_name = CharField()
-    url = CharField()
-
-
-class Map(BaseModel):
-    country = ForeignKeyField(Country, backref="maps")
-    filename = CharField(null=True, unique=True)
-    url = CharField(null=True, unique=True, index=True)
-    date = DateTimeField(null=True)
-
-
 headers = {'User-Agent': "Mozilla/5.0 (X11; Linux x86_64; rv:68.0) Gecko/20100101 Firefox/68.0"}
 
 
 async def setup_db():
-    db.connect()
-    db.create_tables([Map, Country])
-
     r = await get_request("https://www.diplomatie.gouv.fr/fr/conseils-aux-voyageurs/conseils-par-pays-destination/")
     soup = BeautifulSoup(r.text, 'lxml')
+
+    db.connect()
+    db.create_tables([Map, Country])
     for country in soup.select('div.clearfix select#recherche_pays option'):
         if country.text == "Sélectionnez un pays/destination":
             continue
@@ -76,7 +67,7 @@ def find_image(soup):
     return url.netloc + url.path
 
 
-@retry(stop=stop_after_attempt(3), sleep=trio.sleep)
+@retry(stop=stop_after_attempt(3), sleep=trio.sleep, after=after_log(rootLogger, logging.WARNING))
 async def get_request(url, stream=False):
     return await session.get(url, headers=headers, stream=stream)
 
@@ -85,11 +76,11 @@ async def download_map(m):
     DATE_FMT = '%Y%m%d'
     country = m.country_id
     m.date = guess_date(m)
-    m.filename = country + "_" + m.date.strftime(DATE_FMT) + ".jpg"
-    logging.info(f"Downloading map for {country} as {m.filename}")
+    m.path = DOWNLOAD_DIR + "/" + country + "_" + m.date.strftime(DATE_FMT) + ".jpg"
+    logging.info(f"Downloading map for {country} to {m.path}")
     r = await get_request("https://www.diplomatie.gouv.fr/" + m.url, stream=True)
     if r.status_code == 200:
-        async with await trio.open_file(DOWNLOAD_DIR + "/" + m.filename, 'wb') as f:
+        async with await trio.open_file(m.path, 'wb') as f:
             async for bytechunk in r.body:
                 await f.write(bytechunk)
 
@@ -140,8 +131,8 @@ async def process_country(country):
         try:
             await download_map(m)
             m.save()
-        except:
-            logging.error(f"Could not download map for {country.country_name}")
+        except Exception as e:
+            logging.error(f"Could not download map for {country.country_name} : {e}")
     else:
         logging.error(f"Can't find map for {country.country_name}")
 
