@@ -1,4 +1,4 @@
-from peewee import Model, SqliteDatabase, CharField, ForeignKeyField, DateTimeField, IntegrityError
+from peewee import Model, SqliteDatabase, CharField, ForeignKeyField, DateTimeField, IntegrityError, AutoField
 
 DB_FILE = 'maps.db'
 db = SqliteDatabase(DB_FILE)
@@ -16,6 +16,7 @@ class Country(BaseModel):
 
 
 class Map(BaseModel):
+    map_id = AutoField(primary_key=True)
     country = ForeignKeyField(Country, backref="maps")
     path = CharField(null=True, unique=True)
     url = CharField(null=True, unique=True, index=True)

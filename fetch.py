@@ -17,7 +17,7 @@ logFormatter = logging.Formatter("%(asctime)s [%(levelname)-5.5s]  %(message)s")
 rootLogger = logging.getLogger()
 rootLogger.setLevel(logging.INFO)
 
-fileHandler = logging.FileHandler(f"fetch.log")
+fileHandler = logging.FileHandler("fetch.log")
 fileHandler.setFormatter(logFormatter)
 rootLogger.addHandler(fileHandler)
 
@@ -67,7 +67,7 @@ def find_image(soup):
     return url.netloc + url.path
 
 
-@retry(stop=stop_after_attempt(3), sleep=trio.sleep, after=after_log(rootLogger, logging.WARNING))
+@retry(stop=stop_after_attempt(3), sleep=trio.sleep, after=after_log(rootLogger, logging.DEBUG))
 async def get_request(url, stream=False):
     return await session.get(url, headers=headers, stream=stream)
 
